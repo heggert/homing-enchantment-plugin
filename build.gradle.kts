@@ -18,13 +18,13 @@ dependencies {
     compileOnly("io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT")
 }
 
-// Optionally set a group and version
+// Set group and version dynamically
 group = "art.chibi"
+version = "dev"
 
-version = "1.0.1"
-
-// If you want to build a jar with a specific name, you can customize:
+// Ensure the JAR uses the project version
 tasks.jar {
     archiveBaseName.set("HomingEnchantmentPlugin")
-    archiveVersion.set("1.0.1")
+    archiveVersion.set(project.version.toString())
 }
+

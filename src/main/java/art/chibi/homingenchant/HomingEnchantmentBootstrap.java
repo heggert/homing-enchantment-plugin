@@ -12,21 +12,19 @@ import io.papermc.paper.registry.event.RegistryEvents;
 import io.papermc.paper.registry.keys.EnchantmentKeys;
 import io.papermc.paper.registry.keys.ItemTypeKeys;
 import io.papermc.paper.registry.set.RegistrySet;
-import net.kyori.adventure.key.Key;
-import net.kyori.adventure.text.Component;
 
 public class HomingEnchantmentBootstrap implements PluginBootstrap {
     private static final Logger LOGGER = Logger.getLogger("HomingEnchantment");
 
     @Override
     public void bootstrap(BootstrapContext context) {
-        LOGGER.info("HomingEnchantmentBootstrap is initializing...");
+        LOGGER.info("HomingEnchantment bootstrapping...");
         // Register a new handler for the freeze lifecycle event on the enchantment
         // registry
         context.getLifecycleManager().registerEventHandler(RegistryEvents.ENCHANTMENT.freeze().newHandler(event -> {
             event.registry().register(
-                    EnchantmentKeys.create(Key.key("chibi:aimbot")),
-                    b -> b.description(Component.text("Aimbot"))
+                    EnchantmentKeys.create(HomingEnchantmentConstants.ENCHANTMENT_KEY),
+                    b -> b.description(HomingEnchantmentConstants.ENCHANTMENT_TEXT)
                             .supportedItems(RegistrySet.keySet(RegistryKey.ITEM, ItemTypeKeys.CROSSBOW,
                                     ItemTypeKeys.BOW))
                             .anvilCost(1)

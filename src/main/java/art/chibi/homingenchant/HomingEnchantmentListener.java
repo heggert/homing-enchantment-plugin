@@ -21,171 +21,171 @@ import org.bukkit.util.Vector;
 
 import io.papermc.paper.registry.RegistryAccess;
 import io.papermc.paper.registry.RegistryKey;
-import net.kyori.adventure.key.Key;
 
 import java.util.*;
 
 /**
- * Demonstrates a "military-grade" homing arrow using a simplified 3D A*
- * pathfinder,
- * plus speed boosts if the arrow has a likely hit (direct line-of-sight, close
- * range, etc.).
- * 
- * Will also re-check for a new target whenever the current target is no longer
- * valid.
+ * A more optimized "military-grade" homing arrow:
  */
 public class HomingEnchantmentListener implements Listener {
 
-    // A* Search radius in blocks
-    private static final int SEARCH_RADIUS = 60;
+    // ------------------- CONFIG -------------------
+    private static final int SEARCH_RADIUS = 80; // Smaller A* search radius
+    private static final int MAX_EXPANSIONS = 800; // Max A* expansions before we bail
+    private static final int PATHFIND_INTERVAL = 2; // Ticks between path computations
+    private static final int TARGET_CHECK_INTERVAL = 2; // Ticks between target re-check
+    private static final int PARTICLE_INTERVAL = 1; // Ticks between particle spawns
 
-    // Distance threshold where we consider it "likely" the arrow can hit soon
-    private static final double CLOSE_RANGE = 12.0;
-
-    // Factor by which we boost speed in "likely hit" scenarios
-    private static final double SPEED_BOOST_FACTOR = 8.5;
+    private static final double CLOSE_RANGE = 15.0; // Distance that triggers speed boost
+    private static final double SPEED_BOOST_FACTOR = 8.0; // How much to speed up at close range
+    // ------------------------------------------------
 
     @EventHandler
     public void onBowShoot(EntityShootBowEvent event) {
-        if (!(event.getProjectile() instanceof Arrow)) {
-            return; // Only handle standard arrows
-        }
-        if (event.getBow() == null) {
+        if (!(event.getProjectile() instanceof Arrow))
             return;
-        }
+        if (event.getBow() == null)
+            return;
 
         RegistryAccess registry = RegistryAccess.registryAccess();
         Registry<Enchantment> enchantments = registry.getRegistry(RegistryKey.ENCHANTMENT);
 
         // Check if the bow has the custom "chibi:aimbot" enchant
-        if (!event.getBow().containsEnchantment(enchantments.get(Key.key("chibi:aimbot")))) {
+        if (!event.getBow()
+                .containsEnchantment(enchantments.get(HomingEnchantmentConstants.ENCHANTMENT_KEY))) {
             return;
         }
 
-        // It's a homing arrow. Start the homing task.
         Arrow arrow = (Arrow) event.getProjectile();
-        startMilitaryGradeHomingTask(arrow);
+        startOptimizedHomingTask(arrow);
     }
 
     /**
-     * Repeatedly updates the arrow's pathfinding and steers it around obstacles,
-     * boosting speed when direct hits look likely, and re-finding a target if the
-     * old one is invalid.
+     * The main repeating task that handles:
+     * - Finding/validating target (only every TARGET_CHECK_INTERVAL ticks)
+     * - Running pathfinding (only every PATHFIND_INTERVAL ticks)
+     * - Following path or going direct if possible
+     * - Spawning fewer particles (only every PARTICLE_INTERVAL ticks)
      */
-    private void startMilitaryGradeHomingTask(final Arrow arrow) {
+    private void startOptimizedHomingTask(final Arrow arrow) {
         new BukkitRunnable() {
-            private LinkedList<Location> path = null; // A* path (list of block centers)
-            private LivingEntity currentTarget = null;
+            private LivingEntity currentTarget;
+            private LinkedList<Location> currentPath;
+            private int ticksAlive = 0;
 
             @Override
             public void run() {
+                ticksAlive += 1;
+
                 // Cancel if arrow is invalid
                 if (!isArrowInFlight(arrow)) {
                     cancel();
                     return;
                 }
 
-                // Spawn some trail particles each tick
-                spawnParticleTrail(arrow);
-
-                // (1) If we have no target or the target is gone, find a new one
-                if (currentTarget == null || !isValidTarget(currentTarget)) {
-                    currentTarget = findNearestEntityInCone(arrow, 30.0, 90.0);
-                    path = null; // reset path if new target
+                // 1) Possibly spawn some minimal particles
+                if (ticksAlive % PARTICLE_INTERVAL == 0) {
+                    spawnParticleTrail(arrow);
                 }
 
-                // (2) If still no target, let arrow fly normally for now
+                // 2) Possibly find or re-check target
+                if ((currentTarget == null || !isValidTarget(currentTarget))
+                        && ticksAlive % TARGET_CHECK_INTERVAL == 0) {
+                    currentTarget = findNearestEntityInCone(arrow, 30.0, 90.0);
+                    currentPath = null; // reset path
+                }
+
+                // If no target, just fly normally
                 if (currentTarget == null) {
                     return;
                 }
 
-                // (3) If we don't have a path yet, compute one
-                if (path == null) {
-                    path = computeAStarPath(arrow, currentTarget);
+                // 3) Attempt direct shot first
+                if (attemptDirectShot(arrow, currentTarget)) {
+                    return; // if direct shot is successful, skip path logic
                 }
 
-                // (4) Either follow the path or try a direct shot
-                if (path != null && !path.isEmpty()) {
-                    followPath(arrow, currentTarget, path);
-                } else {
-                    // Path is null/empty => attempt direct shot
-                    attemptDirectShot(arrow, currentTarget);
+                // 4) If direct shot is blocked, maybe do pathfinding (but not every tick)
+                if (currentPath == null && ticksAlive % PATHFIND_INTERVAL == 0) {
+                    currentPath = computeAStarPath(arrow, currentTarget);
                 }
+
+                // 5) Follow existing path if we have one
+                if (currentPath != null && !currentPath.isEmpty()) {
+                    followPath(arrow, currentTarget, currentPath);
+                }
+                // else do nothing special this tick
             }
         }.runTaskTimer(HomingEnchantmentPlugin.getPlugin(HomingEnchantmentPlugin.class), 0L, 2L);
+        // ^ main update still runs every 2 ticks, but heavy stuff is spaced out
     }
 
     // --------------------------------------------------------------------------------------------
-    // Particles, Checking Arrow Validity, & Basic Utilities
+    // Particles, Arrow Validation
     // --------------------------------------------------------------------------------------------
-
-    private void spawnParticleTrail(Arrow arrow) {
-        // "glow-like" sparkle
-        arrow.getWorld().spawnParticle(
-                Particle.END_ROD,
-                arrow.getLocation(),
-                5,
-                0.1, 0.1, 0.1,
-                0.0);
-
-        // fiery flame
-        arrow.getWorld().spawnParticle(
-                Particle.FLAME,
-                arrow.getLocation(),
-                8,
-                0.1, 0.1, 0.1,
-                0.0);
-    }
 
     private boolean isArrowInFlight(Arrow arrow) {
-        // Stop pathfinding if arrow is gone or stuck
         return arrow != null
-                && !arrow.isDead()
                 && arrow.isValid()
+                && !arrow.isDead()
                 && !arrow.isInBlock()
                 && !arrow.isOnGround();
     }
 
-    private boolean isValidTarget(LivingEntity entity) {
-        return entity != null && !entity.isDead() && entity.isValid();
+    private void spawnParticleTrail(Arrow arrow) {
+        // A minimal amount of "END_ROD" for sparkle
+        arrow.getWorld().spawnParticle(
+                Particle.END_ROD,
+                arrow.getLocation(),
+                2, // count
+                0.1, 0.1, 0.1,
+                0.0);
+        // A minimal amount of flame
+        arrow.getWorld().spawnParticle(
+                Particle.FLAME,
+                arrow.getLocation(),
+                4,
+                0.1, 0.1, 0.1,
+                0.0);
+    }
+
+    private boolean isValidTarget(LivingEntity e) {
+        return (e != null) && e.isValid() && !e.isDead();
     }
 
     // --------------------------------------------------------------------------------------------
-    // Attempting Direct Shots & Speed Boost
+    // Direct Shots & Speed Boost
     // --------------------------------------------------------------------------------------------
 
     /**
-     * If there's direct line-of-sight, steer arrow directly. Also try speed boost.
+     * If there's direct line-of-sight, steer arrow directly and possibly boost
+     * speed.
+     *
+     * @return true if we successfully took a direct shot, false if line-of-sight is
+     *         blocked.
      */
-    private void attemptDirectShot(Arrow arrow, LivingEntity target) {
-        World world = arrow.getWorld();
+    private boolean attemptDirectShot(Arrow arrow, LivingEntity target) {
         Location arrowLoc = arrow.getLocation();
         Location targetMid = getTargetMidpoint(target);
 
-        if (hasLineOfSight(world, arrowLoc, targetMid)) {
-            // Steer arrow directly
+        if (hasLineOfSight(arrow.getWorld(), arrowLoc, targetMid)) {
             steer(arrow, arrowLoc, targetMid);
-
-            // Possibly boost speed if target is close enough
-            increaseSpeedIfLikelyHit(arrow, arrowLoc, targetMid);
+            maybeBoostSpeed(arrow, arrowLoc, targetMid);
+            return true;
         }
-        // else no direct line-of-sight => do nothing special this tick
+        return false;
     }
 
     /**
-     * If the arrow is very close (CLOSE_RANGE) or line-of-sight is clear,
-     * we multiply arrow velocity by SPEED_BOOST_FACTOR.
+     * If the arrow is close (<= CLOSE_RANGE), multiply arrow velocity by
+     * SPEED_BOOST_FACTOR.
      */
-    private void increaseSpeedIfLikelyHit(Arrow arrow, Location arrowLoc, Location targetLoc) {
-        double dist = arrowLoc.distance(targetLoc);
-        if (dist <= CLOSE_RANGE) {
-            // Speed up
-            Vector newVel = arrow.getVelocity().multiply(SPEED_BOOST_FACTOR);
-            arrow.setVelocity(newVel);
+    private void maybeBoostSpeed(Arrow arrow, Location from, Location to) {
+        if (from.distance(to) <= CLOSE_RANGE) {
+            arrow.setVelocity(arrow.getVelocity().multiply(SPEED_BOOST_FACTOR));
         }
     }
 
-    // Basic steering
     private void steer(Arrow arrow, Location from, Location to) {
         Vector dir = to.toVector().subtract(from.toVector()).normalize();
         double speed = arrow.getVelocity().length();
@@ -193,86 +193,89 @@ public class HomingEnchantmentListener implements Listener {
     }
 
     // --------------------------------------------------------------------------------------------
-    // Following the A* Path
+    // Following a Precomputed Path
     // --------------------------------------------------------------------------------------------
 
-    /**
-     * If we have a path (list of nodes), move to the next node; if we can see
-     * the final target, attempt direct shot & speed boost.
-     */
     private void followPath(Arrow arrow, LivingEntity target, LinkedList<Location> path) {
         Location arrowLoc = arrow.getLocation();
+        if (path.isEmpty())
+            return;
 
-        // Are we close to the next node in path?
-        Location nextNode = path.getFirst();
-        double distance = arrowLoc.distance(nextNode);
-
-        if (distance < 1.0) {
-            // Pop this node
-            path.removeFirst();
-
-            // If we exhausted the path, attempt direct shot
-            if (path.isEmpty()) {
-                attemptDirectShot(arrow, target);
-                return;
-            }
-            // Otherwise, new nextNode
-            nextNode = path.getFirst();
-        }
-
-        // Check if we can see the final target. If yes, skip path.
+        // If we can see final target, let's skip the path
         Location finalNode = getTargetMidpoint(target);
         if (hasLineOfSight(arrow.getWorld(), arrowLoc, finalNode)) {
-            attemptDirectShot(arrow, target);
+            steer(arrow, arrowLoc, finalNode);
+            maybeBoostSpeed(arrow, arrowLoc, finalNode);
+            path.clear(); // done with path
             return;
         }
 
-        // Otherwise, steer toward next path node
+        // Otherwise, aim for the next path node
+        Location nextNode = path.getFirst();
+        double distance = arrowLoc.distance(nextNode);
+
+        // If we're close, pop it
+        if (distance < 1.0) {
+            path.removeFirst();
+            if (path.isEmpty()) {
+                return;
+            }
+            nextNode = path.getFirst();
+        }
+
         steer(arrow, arrowLoc, nextNode);
     }
 
     // --------------------------------------------------------------------------------------------
-    // Finding a Target
+    // Finding Nearest Target
     // --------------------------------------------------------------------------------------------
 
-    /**
-     * Finds the nearest living entity in front of the arrow, within the given
-     * angle cone (e.g. 90° total).
-     */
     private LivingEntity findNearestEntityInCone(Arrow arrow, double radius, double totalAngleDegrees) {
         ProjectileSource source = arrow.getShooter();
-        Vector arrowDir = arrow.getVelocity().normalize();
+        if (!(source instanceof Entity)) {
+            // Could be a dispenser or skeleton, skip if you only want real players
+        }
 
+        Vector arrowDir = arrow.getVelocity().normalize();
         double halfAngle = totalAngleDegrees / 2.0;
         double dotThreshold = Math.cos(Math.toRadians(halfAngle));
 
-        LivingEntity nearest = null;
         double nearestDistSq = Double.MAX_VALUE;
+        LivingEntity nearest = null;
 
-        for (Entity entity : arrow.getNearbyEntities(radius, radius, radius)) {
-            if (!(entity instanceof LivingEntity))
+        // This can still be expensive if many entities are in range
+        // but it's much less than a big pathfinding loop
+        List<Entity> nearby = arrow.getNearbyEntities(radius, radius, radius);
+        for (Entity e : nearby) {
+            if (!(e instanceof LivingEntity))
                 continue;
-            if (entity == source)
+            if (e == source)
                 continue; // skip the shooter
 
-            LivingEntity candidate = (LivingEntity) entity;
+            LivingEntity candidate = (LivingEntity) e;
+            if (!isValidTarget(candidate))
+                continue;
 
-            // Angle check
+            // Check angle
             Vector toCandidate = candidate.getLocation().toVector()
-                    .subtract(arrow.getLocation().toVector())
-                    .normalize();
+                    .subtract(arrow.getLocation().toVector());
+            double distSq = toCandidate.lengthSquared();
+            // Quick skip if it's further than our radius squared
+            if (distSq > radius * radius)
+                continue;
+
+            toCandidate.normalize();
             double dot = arrowDir.dot(toCandidate);
             if (dot < dotThreshold) {
                 continue;
             }
 
-            // Optional: check line-of-sight to the candidate
-            if (!hasLineOfSight(arrow.getWorld(), arrow.getLocation(), getTargetMidpoint(candidate))) {
+            // (Optional) Check line-of-sight
+            Location candidateMid = getTargetMidpoint(candidate);
+            if (!hasLineOfSight(arrow.getWorld(), arrow.getLocation(), candidateMid)) {
                 continue;
             }
 
-            // Among valid, pick nearest
-            double distSq = arrow.getLocation().distanceSquared(candidate.getLocation());
             if (distSq < nearestDistSq) {
                 nearestDistSq = distSq;
                 nearest = candidate;
@@ -286,23 +289,28 @@ public class HomingEnchantmentListener implements Listener {
     }
 
     // --------------------------------------------------------------------------------------------
-    // A* Path Computation
+    // A* Path Computation (Reduced + Capped)
     // --------------------------------------------------------------------------------------------
 
+    /**
+     * Runs a 3D block-based A* with a smaller radius and a limit on expansions.
+     * If we exceed MAX_EXPANSIONS, we give up to avoid meltdown.
+     */
     private LinkedList<Location> computeAStarPath(Arrow arrow, LivingEntity target) {
+        // 1) If too far or no immediate need, skip
         Location arrowLoc = arrow.getLocation();
-        Block startBlock = arrowLoc.getBlock();
-
         Location targetLoc = target.getLocation();
-        Block endBlock = targetLoc.getBlock();
 
-        // Safety check: if start/end are super far, skip pathfinding
-        if (startBlock.getLocation().distanceSquared(endBlock.getLocation()) > SEARCH_RADIUS * SEARCH_RADIUS * 9) {
+        if (arrowLoc.distanceSquared(targetLoc) > SEARCH_RADIUS * SEARCH_RADIUS * 9) {
             return null;
         }
 
-        AStarPathfinder pathfinder = new AStarPathfinder(arrow.getWorld(), startBlock, endBlock, SEARCH_RADIUS);
-        return pathfinder.findPath();
+        // 2) Convert arrow's block + target's block
+        Block start = arrowLoc.getBlock();
+        Block end = targetLoc.getBlock();
+
+        // 3) Actually run pathfinding
+        return new AStarPathfinder(arrow.getWorld(), start, end, SEARCH_RADIUS).findPath();
     }
 
     // --------------------------------------------------------------------------------------------
@@ -317,6 +325,8 @@ public class HomingEnchantmentListener implements Listener {
         double dist = dir.length();
         dir.normalize();
 
+        // The 'rayTrace' is relatively cheap compared to a big path search,
+        // but we still want to avoid spamming it too often
         RayTraceResult result = world.rayTrace(
                 start,
                 dir,
@@ -324,36 +334,26 @@ public class HomingEnchantmentListener implements Listener {
                 FluidCollisionMode.NEVER,
                 true,
                 0.1,
-                entity -> false // skip entities
+                entity -> false // skip entity collisions
         );
 
         // If null => no block was hit => line is clear
-        if (result == null) {
-            return true;
-        }
-        // If we hit a block or entity before "end" => not clear
-        return false;
+        return (result == null);
     }
 
     // --------------------------------------------------------------------------------------------
-    // A* Classes
+    // A* Classes (Optimized with expansions cap)
     // --------------------------------------------------------------------------------------------
-
-    /**
-     * Minimal container for block coords + cost for the A* search
-     */
     private static class AStarNode {
         final int x, y, z;
-        double gCost;
-        double hCost;
+        double gCost = Double.MAX_VALUE;
+        double hCost = 0;
         AStarNode parent;
 
         AStarNode(int x, int y, int z) {
             this.x = x;
             this.y = y;
             this.z = z;
-            this.gCost = Double.MAX_VALUE;
-            this.hCost = 0;
         }
 
         double fCost() {
@@ -361,28 +361,21 @@ public class HomingEnchantmentListener implements Listener {
         }
     }
 
-    /**
-     * Simple 3D A* block-based pathfinder that allows the arrow to navigate around
-     * obstacles.
-     */
     private static class AStarPathfinder {
         private final World world;
-        private final Block startBlock;
-        private final Block endBlock;
+        private final Block startBlock, endBlock;
         private final int maxRadius;
-
-        // Node cache for quick lookups
         private final Map<String, AStarNode> nodeCache = new HashMap<>();
 
-        AStarPathfinder(World world, Block startBlock, Block endBlock, int maxRadius) {
-            this.world = world;
-            this.startBlock = startBlock;
-            this.endBlock = endBlock;
-            this.maxRadius = maxRadius;
+        AStarPathfinder(World w, Block start, Block end, int radius) {
+            this.world = w;
+            this.startBlock = start;
+            this.endBlock = end;
+            this.maxRadius = radius;
         }
 
         LinkedList<Location> findPath() {
-            // Convert to integer coords
+            // Basic checks
             int sx = startBlock.getX(), sy = startBlock.getY(), sz = startBlock.getZ();
             int ex = endBlock.getX(), ey = endBlock.getY(), ez = endBlock.getZ();
 
@@ -393,17 +386,24 @@ public class HomingEnchantmentListener implements Listener {
             PriorityQueue<AStarNode> openSet = new PriorityQueue<>(Comparator.comparingDouble(AStarNode::fCost));
             openSet.add(startNode);
 
+            int expansions = 0; // track how many nodes we pop from openSet
             while (!openSet.isEmpty()) {
                 AStarNode current = openSet.poll();
+                expansions++;
 
-                // If we've reached the end block
+                // If expansions exceed limit, bail out to avoid meltdown
+                if (expansions > MAX_EXPANSIONS) {
+                    return null;
+                }
+
+                // Goal check
                 if (current.x == ex && current.y == ey && current.z == ez) {
+                    // Build path
                     return buildPath(current);
                 }
 
-                // Explore neighbors
                 for (AStarNode neighbor : getNeighbors(current, ex, ey, ez)) {
-                    double newG = current.gCost + 1.0; // cost 1 per block step
+                    double newG = current.gCost + 1.0;
                     if (newG < neighbor.gCost) {
                         neighbor.gCost = newG;
                         neighbor.hCost = heuristic(neighbor, ex, ey, ez);
@@ -415,20 +415,21 @@ public class HomingEnchantmentListener implements Listener {
                     }
                 }
             }
-            // no path found
+
+            // No path found
             return null;
         }
 
         private LinkedList<Location> buildPath(AStarNode endNode) {
             LinkedList<Location> path = new LinkedList<>();
-            AStarNode current = endNode;
-            while (current != null) {
+            AStarNode cur = endNode;
+            while (cur != null) {
                 path.addFirst(new Location(
                         world,
-                        current.x + 0.5,
-                        current.y + 0.5,
-                        current.z + 0.5));
-                current = current.parent;
+                        cur.x + 0.5,
+                        cur.y + 0.5,
+                        cur.z + 0.5));
+                cur = cur.parent;
             }
             return path;
         }
@@ -437,15 +438,19 @@ public class HomingEnchantmentListener implements Listener {
             double dx = (ex - node.x);
             double dy = (ey - node.y);
             double dz = (ez - node.z);
-            // Euclidean distance
             return Math.sqrt(dx * dx + dy * dy + dz * dz);
         }
 
+        private AStarNode getOrCreateNode(int x, int y, int z) {
+            String key = x + "," + y + "," + z;
+            return nodeCache.computeIfAbsent(key, k -> new AStarNode(x, y, z));
+        }
+
         private List<AStarNode> getNeighbors(AStarNode node, int ex, int ey, int ez) {
-            List<AStarNode> result = new ArrayList<>(6);
-            int[][] offsets = {
-                    { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 }
-            };
+            List<AStarNode> results = new ArrayList<>(6);
+
+            // Up to 6 cardinal directions. You can skip vertical if you want simpler
+            int[][] offsets = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
             for (int[] off : offsets) {
                 int nx = node.x + off[0];
                 int ny = node.y + off[1];
@@ -456,13 +461,13 @@ public class HomingEnchantmentListener implements Listener {
                 if (!isPassable(nx, ny, nz))
                     continue;
 
-                AStarNode neighbor = getOrCreateNode(nx, ny, nz);
-                result.add(neighbor);
+                results.add(getOrCreateNode(nx, ny, nz));
             }
-            return result;
+            return results;
         }
 
         private boolean inRange(int x, int y, int z) {
+            // limit expansions to a bounding box around startBlock
             return Math.abs(x - startBlock.getX()) <= maxRadius
                     && Math.abs(y - startBlock.getY()) <= maxRadius
                     && Math.abs(z - startBlock.getZ()) <= maxRadius;
@@ -470,12 +475,8 @@ public class HomingEnchantmentListener implements Listener {
 
         private boolean isPassable(int x, int y, int z) {
             Material mat = world.getBlockAt(x, y, z).getType();
+            // You might need more logic if you want the arrow to fit in a 2-block space
             return !mat.isSolid();
-        }
-
-        private AStarNode getOrCreateNode(int x, int y, int z) {
-            String key = x + "," + y + "," + z;
-            return nodeCache.computeIfAbsent(key, k -> new AStarNode(x, y, z));
         }
     }
 }

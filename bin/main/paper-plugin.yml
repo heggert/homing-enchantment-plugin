@@ -1,0 +1,8 @@
+name: HomingEnchantmentPlugin
+version: 1.0.0
+main: art.chibi.homingenchant.HomingEnchantmentPlugin
+bootstrapper: art.chibi.homingenchant.HomingEnchantmentBootstrap
+description: An example plugin
+author: PaperMC
+website: https://papermc.io
+api-version: '1.21.4'
