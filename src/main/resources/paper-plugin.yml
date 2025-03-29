@@ -1,8 +1,8 @@
 name: HomingEnchantmentPlugin
-version: 1.0.0
+version: 1.0.1
 main: art.chibi.homingenchant.HomingEnchantmentPlugin
 bootstrapper: art.chibi.homingenchant.HomingEnchantmentBootstrap
-description: An example plugin
-author: PaperMC
-website: https://papermc.io
+description: Shooting military grade homing missiles
+author: dondelay
+website: https://chibi.art
 api-version: '1.21.4'

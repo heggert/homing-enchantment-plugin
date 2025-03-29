@@ -111,7 +111,7 @@ public class HomingEnchantment extends Enchantment {
     @SuppressWarnings("removal")
     @Override
     public @NotNull EnchantmentRarity getRarity() {
-        return EnchantmentRarity.VERY_RARE;
+        return EnchantmentRarity.RARE;
     }
 
     @Override

@@ -1,13 +1,18 @@
 {
     "cSpell.words": [
         "Aimbot",
+        "bootstrapper",
         "Bukkit",
         "chibi",
+        "dondelay",
         "ENCHANTABLE",
         "homingenchant",
         "homingenchantment",
         "MAINHAND",
-        "papermc"
+        "papermc",
+        "PATHFIND",
+        "pathfinding"
     ],
-    "java.configuration.updateBuildConfiguration": "automatic"
+    "java.configuration.updateBuildConfiguration": "automatic",
+    "java.compile.nullAnalysis.mode": "automatic"
 }

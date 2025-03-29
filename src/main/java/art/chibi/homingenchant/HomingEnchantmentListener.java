@@ -1,9 +1,11 @@
 package art.chibi.homingenchant;
 
 import org.bukkit.FluidCollisionMode;
+import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.Particle;
+import org.bukkit.Particle.DustOptions;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.Registry;
 import org.bukkit.World;
@@ -12,6 +14,7 @@ import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Arrow;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityShootBowEvent;
@@ -23,22 +26,32 @@ import io.papermc.paper.registry.RegistryAccess;
 import io.papermc.paper.registry.RegistryKey;
 
 import java.util.*;
+// import java.util.logging.Logger;
 
-/**
- * A more optimized "military-grade" homing arrow:
- */
 public class HomingEnchantmentListener implements Listener {
-
+    // private static final Logger LOGGER = Logger.getLogger("HomingEnchantment");
     // ------------------- CONFIG -------------------
     private static final int SEARCH_RADIUS = 80; // Smaller A* search radius
     private static final int MAX_EXPANSIONS = 800; // Max A* expansions before we bail
     private static final int PATHFIND_INTERVAL = 2; // Ticks between path computations
     private static final int TARGET_CHECK_INTERVAL = 2; // Ticks between target re-check
-    private static final int PARTICLE_INTERVAL = 1; // Ticks between particle spawns
+    private static final int PARTICLE_INTERVAL = 1; // Ticks between spawning trail dots
 
-    private static final double CLOSE_RANGE = 15.0; // Distance that triggers speed boost
-    private static final double SPEED_BOOST_FACTOR = 8.0; // How much to speed up at close range
+    // Particle lifetime constant: particles are re-spawned for 10 seconds = 200
+    // ticks,
+    // or until the arrow is no longer in flight.
+    private static final int PARTICLE_DURATION_TICKS = 200;
+
+    // New constants to control particle size growth.
+    private static final float PARTICLE_INITIAL_SIZE = 1.0f;
+    private static final float PARTICLE_GROWTH_RATE = 0.005f; // Increase per tick
+
+    private static final double CLOSE_RANGE = 3.0; // Distance that triggers speed boost
+    private static final double SPEED_BOOST_FACTOR = 3.0; // How much to speed up at close range
     // ------------------------------------------------
+
+    // Map to store last known arrow positions for the dotted trail
+    private final Map<UUID, Location> arrowLastLocations = new HashMap<>();
 
     @EventHandler
     public void onBowShoot(EntityShootBowEvent event) {
@@ -51,8 +64,7 @@ public class HomingEnchantmentListener implements Listener {
         Registry<Enchantment> enchantments = registry.getRegistry(RegistryKey.ENCHANTMENT);
 
         // Check if the bow has the custom "chibi:aimbot" enchant
-        if (!event.getBow()
-                .containsEnchantment(enchantments.get(HomingEnchantmentConstants.ENCHANTMENT_KEY))) {
+        if (!event.getBow().containsEnchantment(enchantments.get(HomingEnchantmentConstants.ENCHANTMENT_KEY))) {
             return;
         }
 
@@ -62,10 +74,10 @@ public class HomingEnchantmentListener implements Listener {
 
     /**
      * The main repeating task that handles:
-     * - Finding/validating target (only every TARGET_CHECK_INTERVAL ticks)
-     * - Running pathfinding (only every PATHFIND_INTERVAL ticks)
-     * - Following path or going direct if possible
-     * - Spawning fewer particles (only every PARTICLE_INTERVAL ticks)
+     * - Finding/validating target (every TARGET_CHECK_INTERVAL ticks)
+     * - Running pathfinding (every PATHFIND_INTERVAL ticks)
+     * - Following path or direct shot if possible
+     * - Spawning a persistent dotted trail (every PARTICLE_INTERVAL ticks)
      */
     private void startOptimizedHomingTask(final Arrow arrow) {
         new BukkitRunnable() {
@@ -75,53 +87,52 @@ public class HomingEnchantmentListener implements Listener {
 
             @Override
             public void run() {
-                ticksAlive += 1;
+                ticksAlive++;
 
-                // Cancel if arrow is invalid
+                // Cancel if the arrow is no longer in flight.
                 if (!isArrowInFlight(arrow)) {
+                    arrowLastLocations.remove(arrow.getUniqueId());
                     cancel();
                     return;
                 }
 
-                // 1) Possibly spawn some minimal particles
+                // 1) Spawn a persistent dotted trail along the arrow's path.
                 if (ticksAlive % PARTICLE_INTERVAL == 0) {
-                    spawnParticleTrail(arrow);
+                    spawnDottedTrail(arrow);
                 }
 
-                // 2) Possibly find or re-check target
+                // 2) (Re)search for a target if needed.
                 if ((currentTarget == null || !isValidTarget(currentTarget))
                         && ticksAlive % TARGET_CHECK_INTERVAL == 0) {
                     currentTarget = findNearestEntityInCone(arrow, 30.0, 90.0);
-                    currentPath = null; // reset path
+                    currentPath = null; // reset path when target changes
                 }
 
-                // If no target, just fly normally
+                // If no valid target, let the arrow fly normally.
                 if (currentTarget == null) {
                     return;
                 }
 
-                // 3) Attempt direct shot first
+                // 3) Attempt a direct shot.
                 if (attemptDirectShot(arrow, currentTarget)) {
-                    return; // if direct shot is successful, skip path logic
+                    return;
                 }
 
-                // 4) If direct shot is blocked, maybe do pathfinding (but not every tick)
+                // 4) If direct shot is blocked, compute a path every PATHFIND_INTERVAL ticks.
                 if (currentPath == null && ticksAlive % PATHFIND_INTERVAL == 0) {
                     currentPath = computeAStarPath(arrow, currentTarget);
                 }
 
-                // 5) Follow existing path if we have one
+                // 5) Follow the computed path if available.
                 if (currentPath != null && !currentPath.isEmpty()) {
                     followPath(arrow, currentTarget, currentPath);
                 }
-                // else do nothing special this tick
             }
         }.runTaskTimer(HomingEnchantmentPlugin.getPlugin(HomingEnchantmentPlugin.class), 0L, 2L);
-        // ^ main update still runs every 2 ticks, but heavy stuff is spaced out
     }
 
     // --------------------------------------------------------------------------------------------
-    // Particles, Arrow Validation
+    // Dotted Trail & Persistent Particle Scheduling
     // --------------------------------------------------------------------------------------------
 
     private boolean isArrowInFlight(Arrow arrow) {
@@ -132,42 +143,88 @@ public class HomingEnchantmentListener implements Listener {
                 && !arrow.isOnGround();
     }
 
-    private void spawnParticleTrail(Arrow arrow) {
-        // A minimal amount of "END_ROD" for sparkle
-        arrow.getWorld().spawnParticle(
-                Particle.END_ROD,
-                arrow.getLocation(),
-                2, // count
-                0.1, 0.1, 0.1,
-                0.0);
-        // A minimal amount of flame
-        arrow.getWorld().spawnParticle(
-                Particle.FLAME,
-                arrow.getLocation(),
-                4,
-                0.1, 0.1, 0.1,
-                0.0);
+    /**
+     * Spawns a dotted trail along the arrow's flight path by interpolating between
+     * its previous
+     * and current positions. Each dot is scheduled to re-spawn persistently for a
+     * fixed lifetime
+     * (PARTICLE_DURATION_TICKS) or until the arrow is no longer in flight.
+     */
+    private void spawnDottedTrail(Arrow arrow) {
+        Location currentLocation = arrow.getLocation();
+        UUID arrowId = arrow.getUniqueId();
+        Location previousLocation = arrowLastLocations.getOrDefault(arrowId, currentLocation);
+
+        double distance = previousLocation.distance(currentLocation);
+        double dotSpacing = 0.5;
+        int dotCount = (int) (distance / dotSpacing);
+
+        Vector direction = (distance > 0)
+                ? currentLocation.toVector().subtract(previousLocation.toVector()).normalize()
+                : new Vector(0, 0, 0);
+
+        // For each dot along the path, schedule a persistent particle task.
+        for (int i = 0; i <= dotCount; i++) {
+            Location dotLocation = previousLocation.clone().add(direction.clone().multiply(i * dotSpacing));
+            schedulePersistentParticle(arrow, dotLocation);
+        }
+
+        arrowLastLocations.put(arrowId, currentLocation);
+    }
+
+    /**
+     * Schedules a task that re-spawns a dust particle at the given location every
+     * tick.
+     * The task cancels itself either when the arrow is no longer in flight or when
+     * the particle has been re-spawned for PARTICLE_DURATION_TICKS ticks.
+     * The particle size grows over time to simulate a rocket/missile trail.
+     *
+     * @param arrow    The arrow associated with this particle dot.
+     * @param location The fixed location for the dot.
+     */
+    private void schedulePersistentParticle(final Arrow arrow, final Location location) {
+        new BukkitRunnable() {
+            int ticks = 0;
+
+            @Override
+            public void run() {
+                // Cancel if the arrow is no longer in flight or lifetime exceeded.
+                if (!isArrowInFlight(arrow) || ticks >= PARTICLE_DURATION_TICKS) {
+                    cancel();
+                    return;
+                }
+                // Compute current particle size based on lifetime progress.
+                float currentSize = PARTICLE_INITIAL_SIZE + ticks * PARTICLE_GROWTH_RATE;
+                DustOptions options = new DustOptions(org.bukkit.Color.WHITE, currentSize);
+                location.getWorld().spawnParticle(
+                        Particle.DUST,
+                        location,
+                        1,
+                        0, 0, 0, // No offset; the dot appears exactly at the location.
+                        options);
+                ticks++;
+            }
+        }.runTaskTimer(HomingEnchantmentPlugin.getPlugin(HomingEnchantmentPlugin.class), 0L, 1L);
     }
 
     private boolean isValidTarget(LivingEntity e) {
-        return (e != null) && e.isValid() && !e.isDead();
+        if (e == null || !e.isValid() || e.isDead() || e.getHealth() <= 0 || e.isInvulnerable())
+            return false;
+        if (e instanceof Player) {
+            Player player = (Player) e;
+            if (player.getGameMode() == GameMode.CREATIVE)
+                return false;
+        }
+        return true;
     }
 
     // --------------------------------------------------------------------------------------------
     // Direct Shots & Speed Boost
     // --------------------------------------------------------------------------------------------
 
-    /**
-     * If there's direct line-of-sight, steer arrow directly and possibly boost
-     * speed.
-     *
-     * @return true if we successfully took a direct shot, false if line-of-sight is
-     *         blocked.
-     */
     private boolean attemptDirectShot(Arrow arrow, LivingEntity target) {
         Location arrowLoc = arrow.getLocation();
         Location targetMid = getTargetMidpoint(target);
-
         if (hasLineOfSight(arrow.getWorld(), arrowLoc, targetMid)) {
             steer(arrow, arrowLoc, targetMid);
             maybeBoostSpeed(arrow, arrowLoc, targetMid);
@@ -176,10 +233,6 @@ public class HomingEnchantmentListener implements Listener {
         return false;
     }
 
-    /**
-     * If the arrow is close (<= CLOSE_RANGE), multiply arrow velocity by
-     * SPEED_BOOST_FACTOR.
-     */
     private void maybeBoostSpeed(Arrow arrow, Location from, Location to) {
         if (from.distance(to) <= CLOSE_RANGE) {
             arrow.setVelocity(arrow.getVelocity().multiply(SPEED_BOOST_FACTOR));
@@ -200,29 +253,23 @@ public class HomingEnchantmentListener implements Listener {
         Location arrowLoc = arrow.getLocation();
         if (path.isEmpty())
             return;
-
-        // If we can see final target, let's skip the path
+        // If the arrow has clear line-of-sight to the final target, use that.
         Location finalNode = getTargetMidpoint(target);
         if (hasLineOfSight(arrow.getWorld(), arrowLoc, finalNode)) {
             steer(arrow, arrowLoc, finalNode);
             maybeBoostSpeed(arrow, arrowLoc, finalNode);
-            path.clear(); // done with path
+            path.clear();
             return;
         }
-
-        // Otherwise, aim for the next path node
+        // Otherwise, aim for the next node in the path.
         Location nextNode = path.getFirst();
         double distance = arrowLoc.distance(nextNode);
-
-        // If we're close, pop it
         if (distance < 1.0) {
             path.removeFirst();
-            if (path.isEmpty()) {
+            if (path.isEmpty())
                 return;
-            }
             nextNode = path.getFirst();
         }
-
         steer(arrow, arrowLoc, nextNode);
     }
 
@@ -233,54 +280,38 @@ public class HomingEnchantmentListener implements Listener {
     private LivingEntity findNearestEntityInCone(Arrow arrow, double radius, double totalAngleDegrees) {
         ProjectileSource source = arrow.getShooter();
         if (!(source instanceof Entity)) {
-            // Could be a dispenser or skeleton, skip if you only want real players
+            // Skip if shooter is not a living entity.
         }
-
         Vector arrowDir = arrow.getVelocity().normalize();
         double halfAngle = totalAngleDegrees / 2.0;
         double dotThreshold = Math.cos(Math.toRadians(halfAngle));
-
         double nearestDistSq = Double.MAX_VALUE;
         LivingEntity nearest = null;
-
-        // This can still be expensive if many entities are in range
-        // but it's much less than a big pathfinding loop
         List<Entity> nearby = arrow.getNearbyEntities(radius, radius, radius);
         for (Entity e : nearby) {
-            if (!(e instanceof LivingEntity))
+            if (!(e instanceof LivingEntity) || e == source)
                 continue;
-            if (e == source)
-                continue; // skip the shooter
-
             LivingEntity candidate = (LivingEntity) e;
             if (!isValidTarget(candidate))
                 continue;
-
-            // Check angle
-            Vector toCandidate = candidate.getLocation().toVector()
-                    .subtract(arrow.getLocation().toVector());
+            Vector toCandidate = candidate.getLocation().toVector().subtract(arrow.getLocation().toVector());
             double distSq = toCandidate.lengthSquared();
-            // Quick skip if it's further than our radius squared
             if (distSq > radius * radius)
                 continue;
-
             toCandidate.normalize();
-            double dot = arrowDir.dot(toCandidate);
-            if (dot < dotThreshold) {
+            if (arrowDir.dot(toCandidate) < dotThreshold)
                 continue;
-            }
-
-            // (Optional) Check line-of-sight
             Location candidateMid = getTargetMidpoint(candidate);
-            if (!hasLineOfSight(arrow.getWorld(), arrow.getLocation(), candidateMid)) {
+            if (!hasLineOfSight(arrow.getWorld(), arrow.getLocation(), candidateMid))
                 continue;
-            }
-
             if (distSq < nearestDistSq) {
                 nearestDistSq = distSq;
                 nearest = candidate;
             }
         }
+        // if (nearest != null) {
+        // LOGGER.info("Nearest: " + nearest.getName());
+        // }
         return nearest;
     }
 
@@ -292,24 +323,13 @@ public class HomingEnchantmentListener implements Listener {
     // A* Path Computation (Reduced + Capped)
     // --------------------------------------------------------------------------------------------
 
-    /**
-     * Runs a 3D block-based A* with a smaller radius and a limit on expansions.
-     * If we exceed MAX_EXPANSIONS, we give up to avoid meltdown.
-     */
     private LinkedList<Location> computeAStarPath(Arrow arrow, LivingEntity target) {
-        // 1) If too far or no immediate need, skip
         Location arrowLoc = arrow.getLocation();
         Location targetLoc = target.getLocation();
-
-        if (arrowLoc.distanceSquared(targetLoc) > SEARCH_RADIUS * SEARCH_RADIUS * 9) {
+        if (arrowLoc.distanceSquared(targetLoc) > SEARCH_RADIUS * SEARCH_RADIUS * 9)
             return null;
-        }
-
-        // 2) Convert arrow's block + target's block
         Block start = arrowLoc.getBlock();
         Block end = targetLoc.getBlock();
-
-        // 3) Actually run pathfinding
         return new AStarPathfinder(arrow.getWorld(), start, end, SEARCH_RADIUS).findPath();
     }
 
@@ -320,13 +340,9 @@ public class HomingEnchantmentListener implements Listener {
     private boolean hasLineOfSight(World world, Location start, Location end) {
         if (start == null || end == null)
             return false;
-
         Vector dir = end.toVector().subtract(start.toVector());
         double dist = dir.length();
         dir.normalize();
-
-        // The 'rayTrace' is relatively cheap compared to a big path search,
-        // but we still want to avoid spamming it too often
         RayTraceResult result = world.rayTrace(
                 start,
                 dir,
@@ -334,16 +350,15 @@ public class HomingEnchantmentListener implements Listener {
                 FluidCollisionMode.NEVER,
                 true,
                 0.1,
-                entity -> false // skip entity collisions
+                entity -> false // Skip entity collisions.
         );
-
-        // If null => no block was hit => line is clear
         return (result == null);
     }
 
     // --------------------------------------------------------------------------------------------
-    // A* Classes (Optimized with expansions cap)
+    // A* Classes (Optimized with Expansions Cap)
     // --------------------------------------------------------------------------------------------
+
     private static class AStarNode {
         final int x, y, z;
         double gCost = Double.MAX_VALUE;
@@ -375,7 +390,6 @@ public class HomingEnchantmentListener implements Listener {
         }
 
         LinkedList<Location> findPath() {
-            // Basic checks
             int sx = startBlock.getX(), sy = startBlock.getY(), sz = startBlock.getZ();
             int ex = endBlock.getX(), ey = endBlock.getY(), ez = endBlock.getZ();
 
@@ -386,37 +400,25 @@ public class HomingEnchantmentListener implements Listener {
             PriorityQueue<AStarNode> openSet = new PriorityQueue<>(Comparator.comparingDouble(AStarNode::fCost));
             openSet.add(startNode);
 
-            int expansions = 0; // track how many nodes we pop from openSet
+            int expansions = 0;
             while (!openSet.isEmpty()) {
                 AStarNode current = openSet.poll();
                 expansions++;
-
-                // If expansions exceed limit, bail out to avoid meltdown
-                if (expansions > MAX_EXPANSIONS) {
+                if (expansions > MAX_EXPANSIONS)
                     return null;
-                }
-
-                // Goal check
-                if (current.x == ex && current.y == ey && current.z == ez) {
-                    // Build path
+                if (current.x == ex && current.y == ey && current.z == ez)
                     return buildPath(current);
-                }
-
                 for (AStarNode neighbor : getNeighbors(current, ex, ey, ez)) {
                     double newG = current.gCost + 1.0;
                     if (newG < neighbor.gCost) {
                         neighbor.gCost = newG;
                         neighbor.hCost = heuristic(neighbor, ex, ey, ez);
                         neighbor.parent = current;
-
-                        if (!openSet.contains(neighbor)) {
+                        if (!openSet.contains(neighbor))
                             openSet.add(neighbor);
-                        }
                     }
                 }
             }
-
-            // No path found
             return null;
         }
 
@@ -424,20 +426,16 @@ public class HomingEnchantmentListener implements Listener {
             LinkedList<Location> path = new LinkedList<>();
             AStarNode cur = endNode;
             while (cur != null) {
-                path.addFirst(new Location(
-                        world,
-                        cur.x + 0.5,
-                        cur.y + 0.5,
-                        cur.z + 0.5));
+                path.addFirst(new Location(world, cur.x + 0.5, cur.y + 0.5, cur.z + 0.5));
                 cur = cur.parent;
             }
             return path;
         }
 
         private double heuristic(AStarNode node, int ex, int ey, int ez) {
-            double dx = (ex - node.x);
-            double dy = (ey - node.y);
-            double dz = (ez - node.z);
+            double dx = ex - node.x;
+            double dy = ey - node.y;
+            double dz = ez - node.z;
             return Math.sqrt(dx * dx + dy * dy + dz * dz);
         }
 
@@ -448,26 +446,21 @@ public class HomingEnchantmentListener implements Listener {
 
         private List<AStarNode> getNeighbors(AStarNode node, int ex, int ey, int ez) {
             List<AStarNode> results = new ArrayList<>(6);
-
-            // Up to 6 cardinal directions. You can skip vertical if you want simpler
             int[][] offsets = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
             for (int[] off : offsets) {
                 int nx = node.x + off[0];
                 int ny = node.y + off[1];
                 int nz = node.z + off[2];
-
                 if (!inRange(nx, ny, nz))
                     continue;
                 if (!isPassable(nx, ny, nz))
                     continue;
-
                 results.add(getOrCreateNode(nx, ny, nz));
             }
             return results;
         }
 
         private boolean inRange(int x, int y, int z) {
-            // limit expansions to a bounding box around startBlock
             return Math.abs(x - startBlock.getX()) <= maxRadius
                     && Math.abs(y - startBlock.getY()) <= maxRadius
                     && Math.abs(z - startBlock.getZ()) <= maxRadius;
@@ -475,7 +468,6 @@ public class HomingEnchantmentListener implements Listener {
 
         private boolean isPassable(int x, int y, int z) {
             Material mat = world.getBlockAt(x, y, z).getType();
-            // You might need more logic if you want the arrow to fit in a 2-block space
             return !mat.isSolid();
         }
     }
